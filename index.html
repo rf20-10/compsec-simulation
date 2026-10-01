@@ -787,8 +787,25 @@ function renderStats(){
 }
 
 /* ---------- import ---------- */
+// One-line question: "Question text A) … B) … C) … * D) … Why C: … Why A: … Ref: …"
+// → the multi-line form below. Returns null when the line isn't one.
+const TAIL_KEYS="(?:Why(?:\\s[A-D])?|Explanation|Rationale|Answer|Correct|Ref|Section|Source)\\s*:";
+function expandInline(l){
+  l=l.trim(); const pos=[]; let from=0;
+  for(const L of "ABCD"){
+    const re=new RegExp("(?:^|\\s)\\(?"+L+"\\)\\s","g"); re.lastIndex=from; const m=re.exec(l);
+    if(!m) return null; const p=m.index+(/^\s/.test(m[0])?1:0); pos.push(p); from=p+1;
+  }
+  if(pos[0]===0) return null;
+  const tailRe=new RegExp("\\s(?="+TAIL_KEYS+")","g"); tailRe.lastIndex=pos[3];
+  const t=tailRe.exec(l); const endD=t?t.index:l.length;
+  const out=["Q: "+l.slice(0,pos[0]).trim().replace(/^(?:Q(?:uestion)?\s*\d*\s*[:.)]|\d+\s*[.)])\s*/i,"")];
+  for(let i=0;i<4;i++) out.push(l.slice(pos[i], i<3?pos[i+1]:endD).trim());
+  if(t) l.slice(endD).split(new RegExp("\\s(?="+TAIL_KEYS+")")).forEach(s=>{ s=s.trim(); if(s) out.push(s); });
+  return out;
+}
 function parseImport(text, defCh){
-  text=text.replace(/\r/g,"").trim(); const out=[], errs=[];
+  text=text.replace(/\r/g,"").replace(/ /g," ").trim(); const out=[], errs=[];
   if(!text) return {out, errs:["Paste at least one question."]};
   if(text[0]==="["||text[0]==="{"){
     try{ let arr=JSON.parse(text); if(!Array.isArray(arr)) arr=[arr];
@@ -799,13 +816,20 @@ function parseImport(text, defCh){
     }catch(e){ errs.push("That looks like JSON but it didn't parse: "+e.message); }
     return {out, errs};
   }
-  const blocks=text.split(/\n\s*\n(?=\s*(?:Q\s*[:.)]|\d+\s*[.)]|Question))/i);
-  blocks.forEach((b,bi)=>{
-    const lines=b.split("\n").map(l=>l.trim()).filter(Boolean); if(!lines.length) return;
+  // Expand one-line questions, then split on blank lines. A chunk that starts with an option,
+  // explanation, answer or ref line belongs to the question above it.
+  const all=[]; text.split("\n").forEach(l=>{ const x=expandInline(l); if(x) all.push("", ...x, ""); else all.push(l); });
+  const CONT=/^(?:\(?[A-Da-d]\s*[).:]\s|(?:Why(?:\s*[A-Da-d])?|Explanation|Rationale|Answer|Correct|Ans|Ref|Section|Source)\s*[:=.])/i;
+  const blocks=[]; let cur=[];
+  const close=()=>{ if(cur.length){ if(blocks.length && CONT.test(cur[0])) blocks[blocks.length-1].push(...cur); else blocks.push(cur); } cur=[]; };
+  all.forEach(l=>{ l=l.trim(); if(l) cur.push(l); else close(); }); close();
+  let qn=0, skipped=0;
+  blocks.forEach(lines=>{
     let q="", opts=[], a=-1, why=[], ref="", per={};
     lines.forEach(l=>{
       let m;
-      if((m=l.match(/^(?:Q(?:uestion)?\s*\d*\s*[:.)]|\d+\s*[.)])\s*(.*)$/i)) && !q){ q=m[1]; }
+      if((m=l.match(/^(?:Q(?:uestion)?\s*\d*\s*[:.)]|\d+\s*[.)])\s*(.*)$/i)) && !opts.length){ q=m[1]; }
+      else if(!q && !opts.length && !CONT.test(l)){ q=l; }
       else if((m=l.match(/^\(?([A-Da-d])\s*[).:]\s+(.*)$/)) && opts.length<4){ let t=m[2]; if(/\s*\*\s*$/.test(t)||/^\*\s*/.test(t)){ a="ABCD".indexOf(m[1].toUpperCase()); t=t.replace(/\s*\*\s*$/,"").replace(/^\*\s*/,""); } opts["ABCD".indexOf(m[1].toUpperCase())]=t; }
       else if((m=l.match(/^(?:Answer|Correct|Ans)\s*[:=]\s*\(?([A-Da-d])/i))){ a="ABCD".indexOf(m[1].toUpperCase()); }
       else if((m=l.match(/^Why\s*([A-Da-d])\s*[:.]\s*(.*)$/i))){ per["ABCD".indexOf(m[1].toUpperCase())]=m[2]; }
@@ -814,12 +838,15 @@ function parseImport(text, defCh){
       else if(!opts.length && q){ q+=" "+l; }
       else if(why.length){ why[why.length-1]+=" "+l; }
     });
+    if(!opts.some(Boolean) && a<0){ skipped++; return; }   // a title or note line, not a question
+    qn++;
     const filled=[0,1,2,3].every(i=>opts[i]);
-    if(!q||!filled||a<0){ errs.push(`Question ${bi+1}${q?` ("${q.slice(0,40)}…")`:""}: ${!q?"missing the question line":!filled?"needs options A–D":"no correct answer marked (add * or an Answer: line)"}.`); return; }
+    if(!q||!filled||a<0){ errs.push(`Question ${qn}${q?` ("${q.slice(0,40)}…")`:""}: ${!q?"missing the question line":!filled?"needs options A–D":"no correct answer marked (add * or an Answer: line)"}.`); return; }
     const w=[0,1,2,3].map(i=> per[i] || (i===a && why.length ? why.join(" ") : ""));
     out.push(mk(q, opts, a, w.some(Boolean)?w:null, ref, defCh));
   });
-  return {out, errs};
+  if(!out.length && !errs.length) errs.push("No questions found. Each one needs options A) to D) and a marked answer.");
+  return {out, errs, skipped};
   function mk(q, opts, a, w, r, ch){
     // store with the correct option first, matching the built-in bank
     const ord=[a].concat([0,1,2,3].filter(i=>i!==a));
@@ -852,7 +879,7 @@ function renderImport(){
 <b>Ref:</b> §2.4 Digital Signature                     (optional)
 
 <b>Q:</b> Next question…</pre>
-      <p class="note" style="margin:0">Mark the correct option with <span class="mono">*</span> or add a line <span class="mono">Answer: C</span>. Numbered questions (<span class="mono">1.</span>, <span class="mono">2.</span>) work too, as does a JSON array of <span class="mono">{q, o:[4], a, w, r}</span>. Leave a blank line between questions.</p>
+      <p class="note" style="margin:0">Mark the correct option with <span class="mono">*</span> or add a line <span class="mono">Answer: C</span>. Numbered questions (<span class="mono">1.</span>, <span class="mono">2.</span>) work too, and so does one question per line: <span class="mono">Question A) … B) … C) … * D) … Why C: … Ref: …</span>. Leave a blank line between multi-line questions. Titles and other lines without options are ignored. A JSON array of <span class="mono">{q, o:[4], a, w, r}</span> also works.</p>
     </section>
     <section class="panel stack"><div class="label">Imported so far</div>
       ${Object.keys(byCh).length? `<div class="chips">${Object.keys(byCh).sort().map(ch=>`<span class="chip" aria-pressed="true">Ch ${ch} <span class="n">${byCh[ch]}</span></span>`).join("")}</div><div class="row">${Object.keys(byCh).sort().map(ch=>`<button class="btn danger" data-del="${ch}">Remove Ch ${ch} imports</button>`).join("")}</div>` : `<div class="empty">None yet.</div>`}
@@ -862,7 +889,7 @@ function renderImport(){
   const doParse=()=>{ parsed=parseImport($("#imptext").value, +$("#impch").value);
     const fresh=parsed.out.filter(q=>!custom[q.id]);
     msg.className="note "+(parsed.errs.length?"bad":"ok");
-    msg.innerHTML = (parsed.out.length?`Ready: <b>${fresh.length}</b> new question${fresh.length===1?"":"s"}${parsed.out.length-fresh.length?` (${parsed.out.length-fresh.length} already in the bank)`:""}. `:"")+(parsed.errs.length?"<br>"+parsed.errs.slice(0,6).map(esc).join("<br>")+(parsed.errs.length>6?`<br>…and ${parsed.errs.length-6} more`:""):"");
+    msg.innerHTML = (parsed.out.length?`Ready: <b>${fresh.length}</b> new question${fresh.length===1?"":"s"}${parsed.out.length-fresh.length?` (${parsed.out.length-fresh.length} already in the bank)`:""}${parsed.skipped?`, ignored ${parsed.skipped} line${parsed.skipped===1?"":"s"} that ${parsed.skipped===1?"isn't a question":"aren't questions"}`:""}. `:"")+(parsed.errs.length?"<br>"+parsed.errs.slice(0,6).map(esc).join("<br>")+(parsed.errs.length>6?`<br>…and ${parsed.errs.length-6} more`:""):"");
     save.disabled=!fresh.length; };
   $("#preview").addEventListener("click",doParse);
   $("#imptext").addEventListener("input",()=>{ save.disabled=true; msg.textContent=""; });
