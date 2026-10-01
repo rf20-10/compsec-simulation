@@ -1,5 +1,5 @@
 // CompSec Sim offline cache. Version changes whenever index.html changes.
-const V = "compsec-dbca440e2b";
+const V = "compsec-09c8e55e5e";
 const ASSETS = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(V).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));

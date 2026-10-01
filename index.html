@@ -358,7 +358,7 @@ const Sync = {
       // live updates from the other device
       this.refs.progress.onSnapshot(s => { if(!s.exists||s.metadata.hasPendingWrites) return; const q=(s.data()||{}).qs||{}; let ch=false; for(const k in q){ if(!prog[k] || (q[k][3]||0) > (prog[k][3]||0)){ prog[k]=q[k]; ch=true; } } if(ch){ saveLocal(); if(!S) render(); } }, ()=>{});
       this.refs.history.onSnapshot(s => { if(!s.exists||s.metadata.hasPendingWrites) return; const a=(s.data()||{}).att||{}; let ch=false; for(const k in a){ if(!hist[k]){ hist[k]=a[k]; ch=true; } } if(ch){ saveLocal(); if(!S) render(); } }, ()=>{});
-      this.refs.custom.onSnapshot(s => { if(!s.exists||s.metadata.hasPendingWrites) return; const q=(s.data()||{}).qs||{}; const keys=Object.keys(q).sort().join(); if(keys!==Object.keys(custom).sort().join()){ custom=Object.assign({},q); saveLocal(); if(!S) render(); } }, ()=>{});
+      this.refs.custom.onSnapshot(s => { if(!s.exists||s.metadata.hasPendingWrites) return; const q=(s.data()||{}).qs||{}; const sig=o=>Object.keys(o).sort().map(k=>k+":"+JSON.stringify(o[k],Object.keys(o[k]).sort())).join("|"); if(sig(q)!==sig(custom)){ custom=Object.assign({},q); saveLocal(); if(!S) render(); } }, ()=>{});
       if(!S) render();
     }catch(e){ this.mode="local"; this.setBadge("local"); }
   },
@@ -820,23 +820,42 @@ function parseImport(text, defCh){
   // explanation, answer or ref line belongs to the question above it.
   const all=[]; text.split("\n").forEach(l=>{ const x=expandInline(l); if(x) all.push("", ...x, ""); else all.push(l); });
   const CONT=/^(?:\(?[A-Da-d]\s*[).:]\s|(?:Why(?:\s*[A-Da-d])?|Explanation|Rationale|Answer|Correct|Ans|Ref|Section|Source)\s*[:=.])/i;
-  const blocks=[]; let cur=[];
-  const close=()=>{ if(cur.length){ if(blocks.length && CONT.test(cur[0])) blocks[blocks.length-1].push(...cur); else blocks.push(cur); } cur=[]; };
-  all.forEach(l=>{ l=l.trim(); if(l) cur.push(l); else close(); }); close();
+  // Questions don't need blank lines between them: once the current question has options, a numbered
+  // line (1., Q:) or any plain line whose next option line is "A)" starts the next question.
+  const OPT=/^\(?[A-Da-d]\s*[).:]\s/, QSTART=/^(?:Q(?:uestion)?\s*\d*\s*[:.)]\s*|\d+\s*[.)]\s+)\S/i;
+  const blocks=[]; let cur=[], hasOpt=false;
+  const close=()=>{ if(cur.length){ if(blocks.length && CONT.test(cur[0])) blocks[blocks.length-1].push(...cur); else blocks.push(cur); } cur=[]; hasOpt=false; };
+  all.forEach((raw,i)=>{
+    const l=raw.trim(); if(!l){ close(); return; }
+    if(hasOpt){
+      let fresh=QSTART.test(l);
+      if(!fresh && !CONT.test(l)){
+        for(let j=i+1;j<all.length;j++){ const n=all[j].trim(); if(!n) break; if(CONT.test(n)){ fresh=/^\(?[Aa]\s*[).:]\s/.test(n); break; } }
+      }
+      if(fresh) close();
+    }
+    cur.push(l); if(OPT.test(l)) hasOpt=true;
+  });
+  close();
   let qn=0, skipped=0;
   blocks.forEach(lines=>{
-    let q="", opts=[], a=-1, why=[], ref="", per={};
+    let q="", opts=[], a=-1, why=[], ref="", per={}, last=null;
+    const star=(k,t)=>{ if(/\s*\*\s*$/.test(t)||/^\*\s*/.test(t)){ a=k; t=t.replace(/\s*\*\s*$/,"").replace(/^\*\s*/,""); } return t; };
     lines.forEach(l=>{
       let m;
-      if((m=l.match(/^(?:Q(?:uestion)?\s*\d*\s*[:.)]|\d+\s*[.)])\s*(.*)$/i)) && !opts.length){ q=m[1]; }
-      else if(!q && !opts.length && !CONT.test(l)){ q=l; }
-      else if((m=l.match(/^\(?([A-Da-d])\s*[).:]\s+(.*)$/)) && opts.length<4){ let t=m[2]; if(/\s*\*\s*$/.test(t)||/^\*\s*/.test(t)){ a="ABCD".indexOf(m[1].toUpperCase()); t=t.replace(/\s*\*\s*$/,"").replace(/^\*\s*/,""); } opts["ABCD".indexOf(m[1].toUpperCase())]=t; }
-      else if((m=l.match(/^(?:Answer|Correct|Ans)\s*[:=]\s*\(?([A-Da-d])/i))){ a="ABCD".indexOf(m[1].toUpperCase()); }
-      else if((m=l.match(/^Why\s*([A-Da-d])\s*[:.]\s*(.*)$/i))){ per["ABCD".indexOf(m[1].toUpperCase())]=m[2]; }
-      else if((m=l.match(/^(?:Why|Explanation|Rationale)\s*[:.]\s*(.*)$/i))){ why.push(m[1]); }
-      else if((m=l.match(/^(?:Ref|Section|Source)\s*[:.]\s*(.*)$/i))){ ref=m[1]; }
-      else if(!opts.length && q){ q+=" "+l; }
-      else if(why.length){ why[why.length-1]+=" "+l; }
+      if((m=l.match(/^(?:Q(?:uestion)?\s*\d*\s*[:.)]|\d+\s*[.)](?=\s))\s*(.*)$/i)) && !opts.length){ q=m[1]; last="q"; }
+      else if(!q && !opts.length && !CONT.test(l)){ q=l; last="q"; }
+      else if((m=l.match(/^\(?([A-Da-d])\s*[).:]\s+(.*)$/)) && opts.length<4){ const k="ABCD".indexOf(m[1].toUpperCase()); opts[k]=star(k,m[2]); last=["o",k]; }
+      else if((m=l.match(/^(?:Answer|Correct|Ans)\s*[:=]\s*\(?([A-Da-d])/i))){ a="ABCD".indexOf(m[1].toUpperCase()); last=null; }
+      else if((m=l.match(/^Why\s*([A-Da-d])\s*[:.]\s*(.*)$/i))){ const k="ABCD".indexOf(m[1].toUpperCase()); per[k]=m[2]; last=["p",k]; }
+      else if((m=l.match(/^(?:Why|Explanation|Rationale)\s*[:.]\s*(.*)$/i))){ why.push(m[1]); last="w"; }
+      else if((m=l.match(/^(?:Ref|Section|Source)\s*[:.]\s*(.*)$/i))){ ref=m[1]; last="r"; }
+      // a line with no label continues whatever came before it (a wrapped question, option or explanation)
+      else if(last==="q"){ q+=" "+l; }
+      else if(last && last[0]==="o"){ opts[last[1]]=star(last[1], opts[last[1]]+" "+l); }
+      else if(last && last[0]==="p"){ per[last[1]]+=" "+l; }
+      else if(last==="w"){ why[why.length-1]+=" "+l; }
+      else if(last==="r"){ ref+=" "+l; }
     });
     if(!opts.some(Boolean) && a<0){ skipped++; return; }   // a title or note line, not a question
     qn++;
@@ -886,15 +905,18 @@ function renderImport(){
     </section></div>`;
   const msg=$("#impmsg"), save=$("#save");
   app.querySelector("[data-act=home]").addEventListener("click",()=>go({v:"home"}));
+  // same question + options = same id; a re-import replaces the stored copy when its details changed
+  const same=(a,b)=>JSON.stringify([a.ch,a.w,a.r])===JSON.stringify([b.ch,b.w,b.r]);
   const doParse=()=>{ parsed=parseImport($("#imptext").value, +$("#impch").value);
-    const fresh=parsed.out.filter(q=>!custom[q.id]);
+    const fresh=parsed.out.filter(q=>!custom[q.id]), upd=parsed.out.filter(q=>custom[q.id] && !same(custom[q.id],q));
+    parsed.todo=fresh.concat(upd); const dup=parsed.out.length-parsed.todo.length;
     msg.className="note "+(parsed.errs.length?"bad":"ok");
-    msg.innerHTML = (parsed.out.length?`Ready: <b>${fresh.length}</b> new question${fresh.length===1?"":"s"}${parsed.out.length-fresh.length?` (${parsed.out.length-fresh.length} already in the bank)`:""}${parsed.skipped?`, ignored ${parsed.skipped} line${parsed.skipped===1?"":"s"} that ${parsed.skipped===1?"isn't a question":"aren't questions"}`:""}. `:"")+(parsed.errs.length?"<br>"+parsed.errs.slice(0,6).map(esc).join("<br>")+(parsed.errs.length>6?`<br>…and ${parsed.errs.length-6} more`:""):"");
-    save.disabled=!fresh.length; };
+    msg.innerHTML = (parsed.out.length?`Ready: <b>${fresh.length}</b> new question${fresh.length===1?"":"s"}${upd.length?`, <b>${upd.length}</b> to update`:""}${dup?` (${dup} already in the bank)`:""}${parsed.skipped?`, ignored ${parsed.skipped} line${parsed.skipped===1?"":"s"} that ${parsed.skipped===1?"isn't a question":"aren't questions"}`:""}. `:"")+(parsed.errs.length?"<br>"+parsed.errs.slice(0,6).map(esc).join("<br>")+(parsed.errs.length>6?`<br>…and ${parsed.errs.length-6} more`:""):"");
+    save.disabled=!parsed.todo.length; };
   $("#preview").addEventListener("click",doParse);
   $("#imptext").addEventListener("input",()=>{ save.disabled=true; msg.textContent=""; });
   $("#impch").addEventListener("change",()=>{ if(parsed) doParse(); });
-  save.addEventListener("click",()=>{ if(!parsed) return; let n=0; parsed.out.forEach(q=>{ if(!custom[q.id]){ custom[q.id]=q; Sync.queue("custom", q.id, q); n++; } }); saveLocal(); Sync.flush(); renderImport(); const m=$("#impmsg"); m.className="note ok"; m.textContent=`Added ${n} question${n===1?"":"s"}. They're now part of every mode.`; });
+  save.addEventListener("click",()=>{ if(!parsed) return; let n=0, u=0; parsed.todo.forEach(q=>{ if(custom[q.id]) u++; else n++; custom[q.id]=q; Sync.queue("custom", q.id, q); }); saveLocal(); Sync.flush(); renderImport(); const m=$("#impmsg"); m.className="note ok"; m.textContent=`Added ${n} question${n===1?"":"s"}${u?` and updated ${u}`:""}. They're now part of every mode.`; });
   app.querySelectorAll("[data-del]").forEach(b=>b.addEventListener("click",()=>{ const ch=+b.dataset.del; modal(`<h3>Remove Chapter ${ch} imports?</h3><p>${byCh[ch]} imported questions will be deleted on all devices.</p><div class="row"><button class="btn ghost" style="flex:1" data-close>Cancel</button><button class="btn danger" style="flex:1" data-yes>Remove</button></div>`, l=>{
     l.querySelector("[data-close]").addEventListener("click",()=>layer.innerHTML="");
     l.querySelector("[data-yes]").addEventListener("click",()=>{ Object.keys(custom).forEach(k=>{ if(+custom[k].ch===ch) delete custom[k]; }); saveLocal(); Sync.pend.custom={}; Sync.replace("custom",{qs:custom,v:1}); layer.innerHTML=""; renderImport(); });
